@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "3b1b PI",
+  "name": "3b1b",
   "version": "1.1",
   "description": "turn all 'π' into 3b1b's happy π",
 
@@ -20,7 +20,8 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"]
+      "js": ["content.js"],
+      "all_frames": true
     }
   ],
 

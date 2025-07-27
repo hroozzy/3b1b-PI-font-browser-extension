@@ -1,31 +1,41 @@
-// content.js (最終修正版 - 完美處理非同步與回饋循環)
+// content.js (v5 - SPA 兼容版)
 
-// 這是「工人」函式，只負責單純的替換工作
-function performReplacement(size) {
+// --- 輔助函式與核心替換邏輯 (保持不變) ---
+function isInsideEditableElement(node) {
+  let element = node.parentElement;
+  while (element) {
+    if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA' || element.isContentEditable) {
+      return true;
+    }
+    element = element.parentElement;
+  }
+  return false;
+}
+
+function performReplacement(rootNode, size) {
   const targetChar = 'π';
   const imageUrl = chrome.runtime.getURL('images/happy.svg');
-
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+  const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT, null, false);
   const nodesToProcess = [];
   let node;
   while (node = walker.nextNode()) {
+    if (isInsideEditableElement(node)) continue;
     const parent = node.parentElement;
     if (parent && (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE')) continue;
     if (node.nodeValue.includes(targetChar)) {
       nodesToProcess.push(node);
     }
   }
-
   for (const textNode of nodesToProcess) {
     if (!textNode.parentElement) continue;
     const fragment = document.createDocumentFragment();
     const parts = textNode.nodeValue.split(targetChar);
-
     parts.forEach((part, index) => {
       fragment.appendChild(document.createTextNode(part));
       if (index < parts.length - 1) {
         const img = document.createElement('img');
         img.src = imageUrl;
+        img.alt = 'π';
         img.style.height = `${size}em`;
         img.style.width = `${size}em`;
         img.style.verticalAlign = `-${size * 0.2}em`;
@@ -35,54 +45,57 @@ function performReplacement(size) {
     });
     textNode.parentElement.replaceChild(fragment, textNode);
   }
+  const allElements = rootNode.querySelectorAll ? rootNode.querySelectorAll('*') : [];
+  for (const element of allElements) {
+    if (element.shadowRoot) {
+      performReplacement(element.shadowRoot, size);
+    }
+  }
 }
 
+// --- 效能優化的觀察者 (核心修正點) ---
+let debounceTimer;
 
-// 這是「管理員」函式，它將被 MutationObserver 呼叫
-// 它的職責是管理開關狀態和設定
 const observerCallback = () => {
-  // --- 最關鍵的修正 ---
-  // 1. 立刻停止觀察，這是第一要務，必須是同步操作
-  observer.disconnect();
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    observer.disconnect();
 
-  // 2. 現在可以安全地執行非同步操作了
-  chrome.storage.sync.get({ piIsEnabled: true, piSize: 1.5 }, (settings) => {
-    // 3. 根據設定決定是否要執行替換
-    if (settings.piIsEnabled) {
-      performReplacement(settings.piSize);
-    }
-
-    // 4. 無論是否執行了替換，工作都完成了，重新開啟觀察
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true
+    chrome.storage.sync.get({ piIsEnabled: true, piSize: 1.5 }, (settings) => {
+      if (settings.piIsEnabled) {
+        // ================== 【核心修正】 ==================
+        // 不再使用有風險的「針對性更新」，而是回歸到掃描整個 body。
+        // 因為有 Debouncing，這在效能上仍然是可接受的，且可靠性大大提高。
+        performReplacement(document.body, settings.piSize);
+        // ===============================================
+      }
+      startObserver();
     });
-  });
+  }, 200);
 };
 
-
-// 建立我們的觀察者，並告訴它使用「管理員」函式作為回呼
 const observer = new MutationObserver(observerCallback);
 
-// 程式的初始啟動點
-// 為了確保在網頁一載入、使用者設定改變時都能即時反應，
-// 我們在這裡也需要讀取設定
+function startObserver() {
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+}
+
+// --- 程式啟動點 (保持不變) ---
 chrome.storage.sync.get({ piIsEnabled: true, piSize: 1.5 }, (settings) => {
-    if (settings.piIsEnabled) {
-        // 如果功能是開啟的，就先執行一次
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', () => performReplacement(settings.piSize));
-        } else {
-            performReplacement(settings.piSize);
-        }
+  if (settings.piIsEnabled) {
+    const initialRun = () => performReplacement(document.body, settings.piSize);
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initialRun);
+    } else {
+      initialRun();
     }
-    // 不論功能是否開啟，都要開始觀察，以便使用者在 Popup 中打開開關時能立即生效
-    observer.observe(document.body, { childList: true, subtree: true });
+  }
+  startObserver();
 });
 
-// 增加一個監聽器，當使用者在 popup 中修改設定時，可以立即反應在頁面上
-chrome.storage.onChanged.addListener((changes, namespace) => {
-    // 重新整理頁面來套用新的設定，這是最簡單可靠的方法
-    // (更複雜的方法是寫一個 "undo" 函式，但重新整理更直觀)
-    window.location.reload();
+chrome.storage.onChanged.addListener(() => {
+  window.location.reload();
 });
